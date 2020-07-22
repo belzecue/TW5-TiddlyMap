@@ -1,4 +1,4 @@
-// @preserve
+/* @preserve TW-Guard */
 /*\
 
 title: $:/plugins/felixhayashi/tiddlymap/js/widget/MapWidget
@@ -8,6 +8,7 @@ module-type: widget
 @preserve
 
 \*/
+/* @preserve TW-Guard */
 
 /*** Imports *******************************************************/
 
@@ -83,7 +84,8 @@ class MapWidget extends Widget {
     // register listeners that are available in any case
     utils.addTWlisteners({
       'tmap:tm-focus-node': this.handleFocusNode,
-      'tmap:tm-reset-focus': this.repaintGraph
+      'tmap:tm-reset-focus': this.repaintGraph,
+      'tmap:tm-neighbourhood-reset-trace': () => { this.initAndRenderGraph(this.graphDomNode); }
     }, this, this);
 
     // Visjs handlers
@@ -117,6 +119,8 @@ class MapWidget extends Widget {
       'mousewheel': [ this.handleCanvasScroll, true ],
       'DOMMouseScroll': [ this.handleCanvasScroll, true ],
       'contextmenu': [ this.handleContextMenu, true ],
+      // Solves: https://github.com/felixhayashi/TW5-TiddlyMap/issues/306
+      'MozMousePixelScroll': [ this.handleExtraCanvasScroll, true ],
     };
 
     this.widgetDomListeners = {
@@ -343,6 +347,10 @@ class MapWidget extends Widget {
 
       // render the full widget
       this.renderFullWidget(this.domNode, this.graphBarDomNode, this.graphDomNode);
+      const downloadCanvas = this.document.createElement('canvas');
+      $tw.utils.addClass(downloadCanvas, 'tmap-download-canvas');
+
+      this.domNode.appendChild(downloadCanvas);
 
     }
 
@@ -353,7 +361,7 @@ class MapWidget extends Widget {
    */
   renderPreview(header, body) {
 
-    const snapshotTRef = this.view.getRoot() + '/snapshot';
+    const snapshotTRef = this.view.snapshotTRef;
     const snapshotTObj = utils.getTiddler(snapshotTRef);
 
     const label = this.document.createElement('span');
@@ -364,8 +372,10 @@ class MapWidget extends Widget {
     if (snapshotTObj) {
 
       // Construct child widget tree
-      const placeholder = this.makeChildWidget(utils.getTranscludeNode(snapshotTRef), true);
-      placeholder.renderChildren(body, null);
+      const tree = utils.getTiddlerNode(this.view.getRoot());
+      tree.children.push(utils.getTranscludeNode(snapshotTRef));
+      this.makeChildWidgets([ tree ]);
+      this.renderChildren(body, body.firstChild);
 
     } else {
 
@@ -411,14 +421,14 @@ class MapWidget extends Widget {
     // *first* inject the bar
     this.rebuildEditorBar(header);
 
+    // if any refresh-triggers exist, register them
+    this.reloadRefreshTriggers();
+
     // *second* initialise graph variables and render the graph
     this.initAndRenderGraph(body);
 
     // register this graph at the caretaker's graph registry
     $tm.registry.push(this);
-
-    // if any refresh-triggers exist, register them
-    this.reloadRefreshTriggers();
 
     // maybe display a welcome message
     this.checkForFreshInstall();
@@ -429,12 +439,11 @@ class MapWidget extends Widget {
       if (url && url.query['tmap-enlarged']) {
 
         this.toggleEnlargedMode(url.query['tmap-enlarged']);
-        //~ this.setView(url.query['tmap-view']);
+        this.setView(url.query['tmap-view']);
 
       }
 
     }
-
   }
 
   /**
@@ -511,6 +520,8 @@ class MapWidget extends Widget {
       viewHolder: this.getViewHolderRef(),
       edgeTypeFilter: view.edgeTypeFilterTRef,
       allEdgesFilter: $tm.selector.allEdgeTypes,
+      isShowNeighbourhood: String(view.isEnabled('neighbourhood_scope')),
+      tracingBtnClass: view.isEnabled('neighbourhood_trace_clicks') ? activeUnicodeBtnClass : unicodeBtnClass,
       neighScopeBtnClass: view.isEnabled('neighbourhood_scope') ? activeUnicodeBtnClass : unicodeBtnClass,
       rasterMenuBtnClass: view.isEnabled('raster') ? activeUnicodeBtnClass : unicodeBtnClass,
     };
@@ -593,11 +604,14 @@ class MapWidget extends Widget {
        || changedTiddlers[this.view.getRoot()] // view's main config changed
     ) {
 
-      this.logger('warn', 'View switched config changed');
+      this.logger('warn', 'View switched or config changed');
 
       this.isPreventZoomOnNextUpdate = false;
       this.view = this.getView(true);
       this.reloadRefreshTriggers();
+
+      this.trace = utils.makeHashMap();
+
       this.rebuildEditorBar();
       this.reloadBackgroundImage();
       this.initAndRenderGraph(this.graphDomNode);
@@ -666,7 +680,6 @@ class MapWidget extends Widget {
                                this.handleTriggeredRefresh,
                                false);
     }
-
   }
 
   /**
@@ -719,16 +732,22 @@ class MapWidget extends Widget {
     }
 
     if (resetFocus) {
+      const preventZoom = this.isPreventZoomOnNextUpdate == null
+        ? false
+        : typeof this.isPreventZoomOnNextUpdate === 'number'
+          ? this.isPreventZoomOnNextUpdate > Date.now()
+          : this.isPreventZoomOnNextUpdate;
 
-      if (!this.isPreventZoomOnNextUpdate) {
-
+      if (!preventZoom) {
         // see https://github.com/almende/vis/issues/987#issuecomment-113226216
         // see https://github.com/almende/vis/issues/939
         this.network.stabilize();
         this.resetFocus = resetFocus;
       }
 
-      this.isPreventZoomOnNextUpdate = false;
+      if (typeof this.isPreventZoomOnNextUpdate !== 'number') {
+        this.isPreventZoomOnNextUpdate = false;
+      }
 
     }
 
@@ -751,7 +770,24 @@ class MapWidget extends Widget {
 
     $tm.start('Reloading Network');
 
-    const graph = $tm.adapter.getGraph({ view: this.view });
+    const params = {
+      view: this.view
+    };
+
+    if (this.view.isEnabled('neighbourhood_trace_clicks')) {
+      const originalMatches = utils.getMatches(this.view.getNodeFilter('compiled'));
+      const clickPathMatches = Object.keys(this.trace);
+      const combinedMatches = [
+        ...originalMatches.filter(tRef => !this.trace[tRef]),
+        ...clickPathMatches,
+      ];
+      params.matches = combinedMatches;
+      params.includeNeighboursOf = this.view.isEnabled('neighbourhood_include_traced_node_neighbours')
+        ? tRef => combinedMatches.includes(tRef)
+        : tRef => originalMatches.includes(tRef);
+    }
+
+    const graph = $tm.adapter.getGraph(params);
 
     const changedNodes = utils.refreshDataSet(
       this.graphData.nodes, // dataset
@@ -890,7 +926,7 @@ class MapWidget extends Widget {
     };
 
     this.tooltip.setEnabled(utils.isTrue($tm.config.sys.popups.enabled, true));
-
+    this.trace = utils.makeHashMap();
     this.network = new vis.Network(parent, this.graphData, this.visOptions);
     // after vis.Network has been instantiated, we fetch a reference to
     // the canvas element
@@ -914,8 +950,14 @@ class MapWidget extends Widget {
     this.rebuildGraph({
       resetFocus: { delay: 0, duration: 0 },
     });
+
     this.handleResizeEvent();
     this.canvas.focus();
+
+    if (this.view.isLiveView() && this.view.isEnabled('neighbourhood_trace_clicks')) {
+      // directly trigger refresh so we add  currently focussed as traced node
+      this.trace[utils.getText(this.refreshTriggers[0])] = true;
+    }
 
   }
 
@@ -976,9 +1018,18 @@ class MapWidget extends Widget {
 
   handleCanvasKeydown(ev) {
 
-    if (ev.keyCode === 46) { // delete
+    if (ev.altKey || ev.metaKey) {
       ev.preventDefault();
-      this.handleRemoveElements(this.network.getSelection());
+
+      if (ev.keyCode >= 48 && ev.keyCode <= 57) { // 0 through 9
+        const scopeStr = String.fromCharCode(ev.keyCode);
+        this.view.setConfig('neighbourhood_scope', scopeStr);
+      }
+    } else {
+      if (ev.keyCode === 46) { // delete
+        ev.preventDefault();
+        this.handleRemoveElements(this.network.getSelection());
+      }
     }
 
   }
@@ -1077,6 +1128,15 @@ class MapWidget extends Widget {
       return false;
     }
 
+  }
+
+  /**
+   * This handles the extraneous event fired by Firefox whenever a
+   * DOMMouseScroll event occurs. We just want to swallow it.
+   * Solves: https://github.com/felixhayashi/TW5-TiddlyMap/issues/306
+   */
+  handleExtraCanvasScroll(ev) {
+    ev.preventDefault();
   }
 
   /**
@@ -1236,8 +1296,26 @@ class MapWidget extends Widget {
 
     // merge options
     const globalOptions = $tm.config.vis;
-    const localOptions = utils.parseJSON(this.view.getConfig('vis'));
-    const options = utils.merge({}, globalOptions, localOptions);
+    const localOptions = utils.parseJSON(this.view.getConfig('vis')) || {};
+
+    const { hierarchical } = (localOptions.layout || {})
+    const corrections = {
+      layout: {
+        hierarchical: {
+          enabled: (
+            hierarchical === undefined || hierarchical === null
+              ? false
+              : typeof hierarchical === 'boolean'
+                ? hierarchical
+                : hierarchical.enabled !== false
+          )
+        }
+      }
+    };
+
+    // we need to first merge local options with corrections to prevent that
+    // global options are overridden by e.g. "hierarchical" being a non-object
+    const options = utils.merge({}, globalOptions, utils.merge(localOptions, corrections));
 
     options.clickToUse = this.clickToUse;
     options.manipulation.enabled = !!this.editorMode;
@@ -1392,7 +1470,7 @@ class MapWidget extends Widget {
     const preselects = {
       'filter.prettyNodeFltr': this.view.getNodeFilter('pretty'),
       'filter.prettyEdgeFltr': this.view.getEdgeTypeFilter('pretty'),
-      'vis-inherited': visInherited
+      'inherited-style': visInherited
     };
 
     const args = {
@@ -1444,17 +1522,18 @@ class MapWidget extends Widget {
   handleSaveCanvas() {
 
     const tempImagePath = '$:/temp/tmap/snapshot';
-    this.createAndSaveSnapshot(tempImagePath);
-    let defaultName = utils.getSnapshotTitle(this.view.getLabel(), 'png');
+    this.createAndSaveSnapshot(100, 100, tempImagePath);
+    let imageName = `${this.view.getLabel()}.png`;
 
     const args = {
       dialog: {
         snapshot: tempImagePath,
-        width: this.canvas.width.toString(),
-        height: this.canvas.height.toString(),
+        view: this.view.getLabel(),
         preselects: {
-          name: defaultName,
-          action: 'download'
+          width: this.canvas.width.toString(),
+          height: this.canvas.height.toString(),
+          name: imageName,
+          action: 'download',
         }
       }
     };
@@ -1462,24 +1541,28 @@ class MapWidget extends Widget {
     $tm.dialogManager.open('saveCanvas', args, (isConfirmed, outTObj) => {
       if (!isConfirmed) return;
 
+      const width = outTObj.fields.width || args.dialog.preselects.width;
+      const height = outTObj.fields.height || args.dialog.preselects.height;
+
+      // save the image with the new sizes defined by the user in the dialog
+      this.createAndSaveSnapshot(width, height, tempImagePath);
+
       // allow the user to override the default name or if name is
       // empty use the original default name
-      defaultName = outTObj.fields.name || defaultName;
-
+      const title = outTObj.fields.name || args.dialog.preselects.imageName;
       const action = outTObj.fields.action;
 
       if (action === 'download') {
-        this.handleDownloadSnapshot(defaultName);
+        this.handleDownloadSnapshot(width, height, title);
 
       } else if (action === 'wiki') {
-        utils.cp(tempImagePath, defaultName, true);
+        utils.cp(tempImagePath, title, true);
         this.dispatchEvent({
-          type: 'tm-navigate', navigateTo: defaultName
+          type: 'tm-navigate', navigateTo: title
         });
 
       } else if (action === 'placeholder') {
         this.view.addPlaceholder(tempImagePath);
-
       }
 
       // in any case
@@ -1489,12 +1572,12 @@ class MapWidget extends Widget {
 
   }
 
-  handleDownloadSnapshot(title) {
+  handleDownloadSnapshot(width, height, title) {
 
     const a = this.document.createElement('a');
     const label = this.view.getLabel();
-    a.download = title || utils.getSnapshotTitle(label, 'png');
-    a.href = this.getSnapshot();
+    a.download = title;
+    a.href = this.getCanvasAsBase64({ size: { width, height }});
 
     // we cannot simply call click() on <a>; chrome is cool with it but
     // firefox requires us to create a mouse event…
@@ -1503,25 +1586,42 @@ class MapWidget extends Widget {
 
   }
 
-  createAndSaveSnapshot(title) {
-
-    const tRef = title || this.view.getRoot() + '/snapshot';
-    $tw.wiki.addTiddler(new $tw.Tiddler({
-      title: tRef,
-      type: 'image/png',
-      text: this.getSnapshot(true),
-      modified: new Date()
-    }));
+  createAndSaveSnapshot(width, height, tRef, title) {
+    $tw.wiki.addTiddler(
+      new $tw.Tiddler(
+        {
+          title: title || tRef,
+          type: 'image/png',
+          text: this.getCanvasAsBase64({ size: { width, height }, withoutPreamble: true })
+        },
+        $tw.wiki.getCreationFields(),
+        $tw.wiki.getModificationFields()
+      )
+    );
 
     return tRef;
 
   }
 
-  getSnapshot(stripPreamble) {
+  getCanvasAsBase64({ withoutPreamble, size } = {}) {
+
+    const oldWidth = this.graphDomNode.style.width;
+    const oldHeight = this.graphDomNode.style.height;
+    if (size) {
+      this.graphDomNode.style.width = `${size.width}px`;
+      this.graphDomNode.style.height = `${size.height}px`;
+      this.network.redraw();
+    }
 
     const data = this.canvas.toDataURL('image/png');
 
-    return (stripPreamble
+    if (size) {
+      this.graphDomNode.style.width = oldWidth;
+      this.graphDomNode.style.height = oldHeight;
+      this.network.redraw();
+    }
+
+    return (withoutPreamble
             ? utils.getWithoutPrefix(data, 'data:image/png;base64,')
             : data);
 
@@ -1587,10 +1687,13 @@ class MapWidget extends Widget {
 
     this.logger('log', trigger, 'Triggered a refresh');
 
-    // special case for the live tab
-    if (this.id === 'live_tab') {
-      const curTiddler = utils.getTiddler(utils.getText(trigger));
+    const curTiddler = utils.getTiddler(utils.getText(trigger));
+
+    if (this.view.isLiveView()) {
       if (curTiddler) {
+        if (this.view.isEnabled('neighbourhood_trace_clicks')) {
+          this.trace[curTiddler.fields.title] = true;
+        }
         const view = (curTiddler.fields['tmap.open-view'] || $tm.config.sys.liveTab.fallbackView);
         if (view && view !== this.view.getLabel()) {
           this.setView(view);
@@ -1902,7 +2005,7 @@ class MapWidget extends Widget {
         return;
       }
 
-      const tRef = utils.getField(outTObj, 'draft.title');
+      const tRef = utils.getField(outTObj, 'draft.title').trim();
 
       if (utils.tiddlerExists(tRef)) {
 
@@ -1942,27 +2045,27 @@ class MapWidget extends Widget {
 
     const tRef = $tm.tracker.getTiddlerById(node.id);
     const tObj = utils.getTiddler(tRef);
-    const globalDefaults = JSON.stringify($tm.config.vis);
-    const localDefaults = this.view.getConfig('vis');
+    const globalDefaultNodeStyle = $tm.config.vis.nodes;
+    const localDefaultNodeStyle = utils.parseJSON(this.view.getConfig('vis'), {}).nodes;
     const nodes = {};
     nodes[node.id] = node;
     const nodeStylesByTRef = $tm.adapter.getInheritedNodeStyles(nodes);
-    const groupStyles = JSON.stringify(nodeStylesByTRef[tRef]);
-    const globalNodeStyle = JSON.stringify(utils.merge(
+    const groupNodeStyles = nodeStylesByTRef[tRef];
+    const globalIndividualNodeStyle = utils.merge(
                             {},
                             { color: tObj.fields['color'] },
-                            utils.parseJSON(tObj.fields['tmap.style'])));
+                            utils.parseJSON(tObj.fields['tmap.style']));
 
     const viewLabel = this.view.getLabel();
 
     // we copy the object since we intend to modify it.
     // NOTE: A deep copy would be needed if a nested property were modified
     //       In that case, use $tw.utils.deepCopy.
-    const nodeData = { ...this.view.getNodeData(node.id) };
+    const localIndividualStyle = { ...this.view.getNodeData(node.id) };
     // we need to delete the positions so they are not reset when a user
     // resets the style…
-    delete nodeData.x;
-    delete nodeData.y;
+    delete localIndividualStyle.x;
+    delete localIndividualStyle.y;
 
     const args = {
       'view': viewLabel,
@@ -1973,11 +2076,12 @@ class MapWidget extends Widget {
       'tidIconField': `global.${$tm.field.nodeIcon}`,
       dialog: {
         preselects: {
-          'inherited-global-default-style': globalDefaults,
-          'inherited-local-default-style': localDefaults,
-          'inherited-group-styles': groupStyles,
-          'global.tmap.style': globalNodeStyle,
-          'local-node-style': JSON.stringify(nodeData)
+          'inherited-global-default-style': JSON.stringify(globalDefaultNodeStyle),
+          'inherited-local-default-style': JSON.stringify(localDefaultNodeStyle),
+          'inherited-group-styles': JSON.stringify(groupNodeStyles),
+          // careful: "global." is parsed later so don't change name
+          'global.tmap.style': JSON.stringify(globalIndividualNodeStyle),
+          'local-individual-node-style': JSON.stringify(localIndividualStyle)
         }
       }
     };
@@ -1991,7 +2095,7 @@ class MapWidget extends Widget {
     };
 
     // local values are retrieved from the view's node data store
-    addToPreselects('local', nodeData, [
+    addToPreselects('local', localIndividualStyle, [
       'label', 'tw-icon', 'fa-icon', 'open-view'
     ]);
 
@@ -2019,9 +2123,9 @@ class MapWidget extends Widget {
       // save local individual data (style + config)
       const local = utils.getPropertiesByPrefix(fields, 'local.', true);
 
-      // CAREFUL: Never change 'local-node-style' to 'local.node-style'
+      // CAREFUL: Never change 'local-individual-node-style' to 'local.node-style'
       // (with a dot) because it will get included in the loop!
-      const data = utils.parseJSON(fields['local-node-style'], {});
+      const data = utils.parseJSON(fields['local-individual-node-style'], {});
 
       for (let p in local) {
         data[p] = local[p] || undefined;
@@ -2059,31 +2163,35 @@ class MapWidget extends Widget {
    * click event.
    */
   handleVisDoubleClickEvent(properties) {
-
     if (properties.nodes.length || properties.edges.length) {
-
       if (this.editorMode || !utils.isTrue($tm.config.sys.singleClickMode)) {
-
         this.handleOpenMapElementEvent(properties);
-
       }
-
-
     } else { // = clicked on an empty spot
-
       if (this.editorMode) {
         this.handleInsertNode(properties.pointer.canvas);
       }
-
     }
-
   }
 
   handleOpenMapElementEvent({ nodes, edges }) {
 
     if (nodes.length) { // clicked on a node
-
       const node = this.graphData.nodesById[nodes[0]];
+      if (this.view.isEnabled('neighbourhood_trace_clicks')) {
+        this.trace[$tm.adapter.getTiddlerById(node.id)] = true;
+        this.isPreventZoomOnNextUpdate = Date.now() + 500;
+        this.rebuildGraph();
+
+        if (this.view.isEnabled('neighbourhood_focus_newly_traced_node')) {
+          setTimeout(() => {
+            this.network.focus(node.id, {
+              scale: 1,
+              animation: true
+            });
+          }, 1500);
+        }
+      }
       if (node['open-view']) {
         $tm.notify('Switching view');
         this.setView(node['open-view']);
@@ -2706,7 +2814,6 @@ class MapWidget extends Widget {
     if (!imgTObj && !bgFieldValue) return;
 
     const img = new Image();
-    const ajaxCallback = function(b64) { img.src = b64; };
     img.onload = () => {
       // only now set the backgroundImage to the img object!
       this.backgroundImage = img;
@@ -2716,14 +2823,12 @@ class MapWidget extends Widget {
     if (imgTObj) { // try loading from tiddler
       const urlField = imgTObj.fields['_canonical_uri'];
       if (urlField) { // try loading by uri field
-        utils.getImgFromWeb(urlField, ajaxCallback);
+        img.src = urlField;
       } else if (imgTObj.fields.text) { // try loading from base64
         img.src = $tw.utils.makeDataUri(imgTObj.fields.text, imgTObj.fields.type);
       }
-
     } else if (bgFieldValue) { // try loading directly from reference
-      utils.getImgFromWeb(bgFieldValue, ajaxCallback);
-
+      img.src = bgFieldValue;
     }
 
   }

@@ -1,4 +1,4 @@
-// @preserve
+/* @preserve TW-Guard */
 /*\
 
 title: $:/plugins/felixhayashi/tiddlymap/js/widget/MapConfigWidget
@@ -8,6 +8,7 @@ module-type: widget
 @preserve
 
 \*/
+/* @preserve TW-Guard */
 
 import utils from '$:/plugins/felixhayashi/tiddlymap/js/utils';
 import vis from '$:/plugins/felixhayashi/vis/vis.js';
@@ -84,13 +85,12 @@ MapConfigWidget.prototype.render = function(parent, nextSibling) {
     var fieldName = this.inheritedFields[i];
     var style = utils.parseFieldData(this.pipeTRef, fieldName, {});
 
-    // maybe the inherited options also come without a top level property
-    // so we do the same here to…
-    // TODO looks clumsy; do it in a more generic way…
+    // inherited options for nodes/edges come without a top level property
+    // so we need to wrap these options
     if (this.mode === 'manage-edge-types') {
-      if (!style.edges) { style = { edges: style }; }
+      style = { edges: style };
     } else if (this.mode === 'manage-node-types') {
-      if (!style.nodes) { style = { nodes: style }; }
+      style = { nodes: style };
     }
 
     this.inherited = utils.merge(this.inherited, style);
@@ -299,13 +299,15 @@ MapConfigWidget.prototype.getOptionFilter = function(mode) {
     nodes: {
       borderWidth: true,
       borderWidthSelected: true,
+      widthConstraint: true,
+      heightConstraint: true,
       color: {
         background: true,
         border: true
       },
       font: {
         color: true,
-        size: true
+        size: true,
       },
       icon: true,
       labelHighlightBold: false,
@@ -335,7 +337,7 @@ MapConfigWidget.prototype.getOptionFilter = function(mode) {
       tooltipDelay: true
     },
     layout: {
-      hierarchical: false
+      hierarchical: true
     },
     manipulation: {
       initiallyActive: true

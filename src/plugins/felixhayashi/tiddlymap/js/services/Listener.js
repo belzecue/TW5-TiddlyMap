@@ -1,4 +1,4 @@
-// @preserve
+/* @preserve TW-Guard */
 /*\
 
 title: $:/plugins/felixhayashi/tiddlymap/js/startup/listener
@@ -8,6 +8,7 @@ module-type: startup
 @preserve
 
 \*/
+/* @preserve TW-Guard */
 
 /*** Imports *******************************************************/
 
@@ -134,7 +135,7 @@ const handleConfigureSystem = () => {
     dialog: {
       preselects: {
         'liveTab': '' + hasLiveTab,
-        'vis-inherited': JSON.stringify(visDefConf),
+        'inherited-style': JSON.stringify(visDefConf),
         'config.vis': utils.getText($tm.ref.visUserConf),
         'config.sys': $tm.config.sys,
       }
@@ -287,7 +288,13 @@ const handleLoadTypeForm = ({ paramObject: { mode, id, output } }) => {
       'typeTRef': type.fullPath,
       'temp.idImmutable': (type.isShipped ? 'true' : ''),
       'temp.newId': type.id,
-      'vis-inherited': JSON.stringify($tm.config.vis)
+      'inherited-style':
+        JSON.stringify(
+          (mode === 'manage-edge-types'
+            ? $tm.config.vis.edges
+            : $tm.config.vis.nodes
+          ) || {}
+        )
     }
   ));
 

@@ -1,4 +1,4 @@
-// @preserve
+/* @preserve TW-Guard */
 /*\
 
 title: $:/plugins/felixhayashi/tiddlymap/js/lib/utils/tmap
@@ -8,6 +8,7 @@ module-type: library
 @preserve
 
 \*/
+/* @preserve TW-Guard */
 
 /*** Imports *******************************************************/
 
@@ -468,8 +469,12 @@ export const getLookupTable = (col, lookupKey) => {
       }
     }
 
-    // @todo use exception class
-    throw new Error(`Cannot use "${idx}" as lookup table index`);
+    // only throw if lookupKey is set to avoid crash if duplicates exist in col
+    // Solves: https://github.com/felixhayashi/TW5-TiddlyMap/issues/327
+    if (lookupKey) {
+      // @todo use exception class
+      throw new Error(`Cannot use "${idx}" as lookup table index`);
+    }
 
   }
 
@@ -481,11 +486,3 @@ export const getLookupTable = (col, lookupKey) => {
  * Alias for {@link getLookupTable}
  */
 export const getArrayValuesAsHashmapKeys = getLookupTable;
-
-/**
- *
- * @param viewLabel
- * @param type
- */
-export const getSnapshotTitle = (viewLabel, type) =>
-  `Snapshot – ${viewLabel} (${new Date().toDateString()}).${type || 'png'}`;
